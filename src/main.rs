@@ -35,6 +35,14 @@ const fn abs(n: f64) -> f64 {
     }
 }
 
+const fn powu(f: f64, n: u64) -> f64 {
+    match n {
+        0 => panic!(),
+        1 => f,
+        n => f * powu(f, n - 1),
+    }
+}
+
 // Computes total error of target to output.
 const fn toterr(target: &[f64], output: &[f64]) -> f64 {
     let mut sum = 0.0;
@@ -53,8 +61,9 @@ const fn act(x: f64) -> f64 {
 }
 
 // Returns partial derivative of activation function.
-const fn pdact(a: f64) -> f64 {
-    a * (1.0 - a)
+const fn pdact(x: f64) -> f64 {
+    //x * (1.0 - x)
+    1.0 / powu(1.0 + abs(x), 2)
 }
 
 // Returns floating point random from 0.0 - 1.0.
@@ -70,40 +79,33 @@ const fn frand(seed: u64) -> (u64, f64) {
 const fn wbrand(t: &mut Tinn) {
     let mut seed = 981635986311532;
 
-    const_for!(for i in (0, t.nw) {
+    const_for!(for i in (0, t.weights1.len()) {
         let (ns, r) = frand(seed);
         seed = ns;
-        t.w[i] = r - 0.5;
+        t.weights1[i] = r - 0.5;
     });
 
-    const_for!(for i in (0, t.nb) {
+    const_for!(for i in (0, t.biases.len()) {
         let (ns, r) = frand(seed);
         seed = ns;
-        t.b[i] = r - 0.5;
+        t.biases[i] = r - 0.5;
     });
 }
 
 struct Tinn {
-    // All the weights.
-    w: &'static mut [f64],
-    // Hidden to output layer weights.
-    x: &'static mut [f64],
-    // Biases.
-    b: &'static mut [f64],
-    // Hidden layer.
-    h: &'static mut [f64],
-    // Output layer.
-    o: &'static mut [f64],
-    // Number of biases - always two - Tinn only supports a single hidden layer.
-    nb: usize,
-    // Number of weights.
-    nw: usize,
     // Number of inputs.
-    nips: usize,
-    // Number of hidden neurons.
-    nhid: usize,
-    // Number of outputs.
-    nops: usize,
+    input_size: usize,
+    // All the weights.
+    weights1: &'static mut [f64],
+    // Hidden to output layer weights.
+    weights2: &'static mut [f64],
+    // Biases.
+    // Number of biases is always two - Tinn only supports a single hidden layer.
+    biases: &'static mut [f64],
+    // Hidden layer.
+    hidden: &'static mut [f64],
+    // Output layer.
+    output: &'static mut [f64],
 }
 
 const unsafe fn allocate_array(size: usize) -> &'static mut [f64] {
@@ -119,25 +121,21 @@ const unsafe fn allocate_array(size: usize) -> &'static mut [f64] {
 
 impl Tinn {
     // Constructs a tinn with number of inputs, number of hidden neurons, and number of outputs
-    pub const fn build(nips: usize, nhid: usize, nops: usize) -> Self {
-        let nb = 2;
-        let nw = nhid * (nips + nops);
-        let w = unsafe { allocate_array(nw) };
-        let x = unsafe {
-            let skip = nhid * nips;
-            core::slice::from_raw_parts_mut(w.as_mut_ptr().add(skip), nw - skip)
+    pub const fn build(input_size: usize, hidden_size: usize, output_size: usize) -> Self {
+        let weights1_size = hidden_size * (input_size + output_size);
+        let weights1 = unsafe { allocate_array(weights1_size) };
+        let weights2 = unsafe {
+            let skip = hidden_size * input_size;
+            core::slice::from_raw_parts_mut(weights1.as_mut_ptr().add(skip), weights1_size - skip)
         };
+        let biases_size = 2;
         let mut this = Self {
-            w,
-            x,
-            b: unsafe { allocate_array(nb) },
-            h: unsafe { allocate_array(nhid) },
-            o: unsafe { allocate_array(nops) },
-            nb,
-            nw,
-            nips,
-            nhid,
-            nops,
+            input_size,
+            weights1,
+            weights2,
+            biases: unsafe { allocate_array(biases_size) },
+            hidden: unsafe { allocate_array(hidden_size) },
+            output: unsafe { allocate_array(output_size) },
         };
         wbrand(&mut this);
         this
@@ -146,19 +144,19 @@ impl Tinn {
 
 // Performs back propagation.
 const fn bprop(t: &mut Tinn, input: &[f64], target: &[f64], rate: f64) {
-    const_for!(for i in (0, t.nhid) {
+    const_for!(for i in (0, t.hidden.len()) {
         let mut sum = 0.0;
-        const_for!(for j in (0, t.nops) {
-            let a = pderr(t.o[j], target[j]);
-            let b = pdact(t.o[j]);
-            sum += a * b * t.x[j * t.nhid + i];
+        const_for!(for j in (0, t.output.len()) {
+            let a = pderr(t.output[j], target[j]);
+            let b = pdact(t.output[j]);
+            sum += a * b * t.weights2[j * t.hidden.len() + i];
             // Correct weights in hidden to output layer.
-            t.x[j * t.nhid + i] -= rate * a * b * t.h[i];
+            t.weights2[j * t.hidden.len() + i] -= rate * a * b * t.hidden[i];
         });
 
         // Correct weights in input to hidden layer.
-        const_for!(for j in (0, t.nips) {
-            t.w[i * t.nips + j] -= rate * sum * pdact(t.h[i]) * input[j];
+        const_for!(for j in (0, t.input_size) {
+            t.weights1[i * t.input_size + j] -= rate * sum * pdact(t.hidden[i]) * input[j];
         });
     })
 }
@@ -166,21 +164,21 @@ const fn bprop(t: &mut Tinn, input: &[f64], target: &[f64], rate: f64) {
 // Performs forward propagation.
 const fn fprop(t: &mut Tinn, input: &[f64]) {
     // Calculate hidden layer neuron values.
-    const_for!(for i in (0, t.nhid) {
+    const_for!(for i in (0, t.hidden.len()) {
         let mut sum = 0.0;
-        const_for!(for j in (0, t.nips) {
-            sum += input[j] * t.w[i * t.nips + j];
+        const_for!(for j in (0, t.input_size) {
+            sum += input[j] * t.weights1[i * t.input_size + j];
         });
-        t.h[i] = act(sum + t.b[0]);
+        t.hidden[i] = act(sum + t.biases[0]);
     });
 
     // Calculate output layer neuron values.
-    const_for!(for i in (0, t.nops) {
+    const_for!(for i in (0, t.output.len()) {
         let mut sum = 0.0;
-        const_for!(for j in (0, t.nhid) {
-            sum += t.h[j] * t.x[i * t.nhid + j];
+        const_for!(for j in (0, t.hidden.len()) {
+            sum += t.hidden[j] * t.weights2[i * t.hidden.len() + j];
         });
-        t.o[i] = act(sum + t.b[1]);
+        t.output[i] = act(sum + t.biases[1]);
     })
 }
 
@@ -188,8 +186,8 @@ const fn fprop(t: &mut Tinn, input: &[f64]) {
 const fn xtpredict<'t>(t: &'t mut Tinn, input: &[f64]) -> &'static [f64] {
     fprop(t, input);
     unsafe {
-        let new = allocate_array(t.o.len());
-        core::ptr::copy(t.o.as_ptr(), new.as_mut_ptr(), t.o.len());
+        let new = allocate_array(t.output.len());
+        core::ptr::copy(t.output.as_ptr(), new.as_mut_ptr(), t.output.len());
         new
     }
 }
@@ -198,7 +196,7 @@ const fn xtpredict<'t>(t: &'t mut Tinn, input: &[f64]) -> &'static [f64] {
 const fn xttrain(t: &mut Tinn, input: &[f64], target: &[f64], rate: f64) -> f64 {
     fprop(t, input);
     bprop(t, input, target, rate);
-    toterr(target, t.o)
+    toterr(target, t.output)
 }
 
 fn main() {
@@ -207,10 +205,9 @@ fn main() {
         let nops = 10;
         let nhid = 28;
         let anneal = 0.99;
-        let iterations = 128;
+        let iterations = 2;
 
         let data = include!("../semeion.data");
-        //let data = [0];
         let mut rate = 1.0;
         let mut tinn = Tinn::build(nips, nhid, nops);
         let mut last_error = 0.0;
