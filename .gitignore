@@ -1,0 +1,8 @@
+*.dat*
+*.txt
+*.o
+*.d
+test
+*.tinn
+
+/target
