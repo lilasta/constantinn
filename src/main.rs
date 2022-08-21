@@ -1,13 +1,18 @@
+#![feature(const_eval_select)]
 #![feature(const_for)]
 #![feature(const_fn_floating_point_arithmetic)]
 #![feature(const_heap)]
 #![feature(const_mut_refs)]
 #![feature(const_slice_from_raw_parts_mut)]
+#![feature(const_swap)]
 #![feature(core_intrinsics)]
 #![feature(decl_macro)]
 #![feature(inline_const)]
+#![feature(new_uninit)]
 #![feature(const_eval_limit)]
 #![const_eval_limit = "0"]
+
+use std::mem::MaybeUninit;
 
 macro const_for(for $i:ident in ($s:expr, $e:expr) $b:block) {{
     let mut $i = $s;
@@ -56,13 +61,20 @@ const fn toterr(target: &[f64], output: &[f64]) -> f64 {
 
 // Activation function.
 const fn act(x: f64) -> f64 {
+    // sigmoid
     //1.0 / (1.0 + (-x).exp())
+
+    // softsign
     x / (1.0 + abs(x))
 }
 
 // Returns partial derivative of activation function.
-const fn pdact(x: f64) -> f64 {
-    //x * (1.0 - x)
+const fn pdact(a: f64) -> f64 {
+    // sigmoid
+    //a * (1.0 - a)
+
+    // softsign
+    let x = -a / (a - 1.0); // inverse of softsign
     1.0 / powu(1.0 + abs(x), 2)
 }
 
@@ -109,14 +121,25 @@ struct Tinn {
 }
 
 const unsafe fn allocate_array(size: usize) -> &'static mut [f64] {
-    core::slice::from_raw_parts_mut(
-        core::intrinsics::const_allocate(
-            core::mem::size_of::<f64>() * size,
-            core::mem::align_of::<f64>(),
-        )
-        .cast::<f64>(),
-        size,
-    )
+    const fn ct(size: usize) -> &'static mut [f64] {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                core::intrinsics::const_allocate(
+                    core::mem::size_of::<f64>() * size,
+                    core::mem::align_of::<f64>(),
+                )
+                .cast::<f64>(),
+                size,
+            )
+        }
+    }
+
+    fn rt(size: usize) -> &'static mut [f64] {
+        let ptr = Box::into_raw(Box::<[MaybeUninit<f64>]>::new_zeroed_slice(size)).cast::<f64>();
+        unsafe { core::slice::from_raw_parts_mut(ptr, size) }
+    }
+
+    core::intrinsics::const_eval_select((size,), ct, rt)
 }
 
 impl Tinn {
@@ -199,31 +222,54 @@ const fn xttrain(t: &mut Tinn, input: &[f64], target: &[f64], rate: f64) -> f64 
     toterr(target, t.output)
 }
 
-fn main() {
-    let (pred, rate, error) = const {
-        let nips = 256;
-        let nops = 10;
-        let nhid = 28;
-        let anneal = 0.99;
-        let iterations = 2;
+const fn shuffle<T>(data: &mut [T]) {
+    let mut seed = 130753105;
+    const_for!(for a in (0, data.len()) {
+        seed = frand(seed).0;
 
-        let data = include!("../semeion.data");
+        let b = (seed as usize) % data.len();
+        data.swap(a, b);
+    });
+}
+
+fn main() {
+    let (target, pred, rate, error) = unsafe {
+        //let data = include!("../semeion.data");
+
+        #[allow(non_upper_case_globals)]
+        static mut data: [([f64; 256], [f64; 10]); 1593] = include!("../semeion.data");
+
+        let hidden_size = 28;
+        let anneal = 0.99;
+        let iterations = 256;
+
         let mut rate = 1.0;
-        let mut tinn = Tinn::build(nips, nhid, nops);
+        let mut tinn = Tinn::build(data[0].0.len(), hidden_size, data[0].1.len());
         let mut last_error = 0.0;
+
         const_for!(for i in (0, iterations) {
+            shuffle(&mut data);
+
             let mut error = 0.0;
             const_for!(for j in (0, data.len()) {
-                let input = &data[j].0;
-                let target = &data[j].1;
+                let (input, target) = &data[j];
                 error += xttrain(&mut tinn, input, target, rate);
             });
+
             rate *= anneal;
             last_error = error;
         });
 
-        (xtpredict(&mut tinn, &data[0].0), rate, last_error)
+        (
+            &data[0].1,
+            xtpredict(&mut tinn, &data[0].0),
+            rate,
+            last_error / data.len() as f64,
+        )
     };
 
-    println!("{:?}, {:?}, {:?}", pred, rate, error);
+    println!("target: {:?}", target);
+    println!("pred: {:?}", pred);
+    println!("err: {:?}", error);
+    println!("rate: {:?}", rate);
 }
