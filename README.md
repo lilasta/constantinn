@@ -1,3 +1,5 @@
+# Tinn
+
 Tinn (Tiny Neural Network) is a 200 line dependency free neural network library written in C99.
 
 For a demo on how to learn hand written digits, get some training data:
